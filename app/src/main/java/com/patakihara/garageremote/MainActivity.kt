@@ -50,13 +50,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.content.Intent
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -172,6 +176,20 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     val context = LocalContext.current
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var pinnedSlot by remember { mutableIntStateOf(getGarageSlot(context, garage.id) ?: 0) }
+    var isCalling by remember { mutableStateOf(false) }
+    var secondsLeft by remember { mutableIntStateOf(12) }
+
+    LaunchedEffect(isCalling) {
+        if (isCalling) {
+            secondsLeft = 12
+            repeat(12) {
+                delay(1_000L)
+                secondsLeft--
+            }
+            delay(2_500L)
+            isCalling = false
+        }
+    }
 
     var hasCallPermission by remember {
         mutableStateOf(
@@ -191,7 +209,11 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     ) { perms ->
         hasCallPermission = perms[Manifest.permission.CALL_PHONE] == true
         hasAnswerPermission = perms[Manifest.permission.ANSWER_PHONE_CALLS] == true
-        if (hasCallPermission) openGarage(context, garage.phoneNumber, hasAnswerPermission)
+        if (hasCallPermission) {
+            openGarage(context, garage.phoneNumber, hasAnswerPermission)
+            returnToApp(context)
+            isCalling = true
+        }
     }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
@@ -253,6 +275,8 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                 onClick = {
                     if (hasCallPermission) {
                         openGarage(context, garage.phoneNumber, hasAnswerPermission)
+                        returnToApp(context)
+                        isCalling = true
                     } else {
                         permissionLauncher.launch(
                             arrayOf(
@@ -287,6 +311,37 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
             },
         )
     }
+
+    if (isCalling) {
+        AlertDialog(
+            onDismissRequest = { isCalling = false },
+            title = { Text("Opening ${garage.name}") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text("Hanging up automatically in $secondsLeft s…")
+                    LinearProgressIndicator(
+                        progress = { secondsLeft / 12f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { isCalling = false }) { Text("Dismiss") }
+            },
+        )
+    }
+}
+
+private fun returnToApp(context: android.content.Context) {
+    context.startActivity(
+        Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        }
+    )
 }
 
 private fun requestAddTile(context: android.content.Context, slot: Int, garageName: String) {
