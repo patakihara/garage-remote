@@ -3,10 +3,14 @@ package com.patakihara.garageremote
 import android.Manifest
 import android.app.StatusBarManager
 import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.Icon
+import android.location.Location
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -32,8 +36,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Garage
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.LocationOff
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -50,6 +56,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -62,10 +69,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import android.content.Intent
-import android.os.Handler
-import android.os.Looper
-import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -77,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.patakihara.garageremote.ui.theme.GarageRemoteTheme
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,10 +98,24 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
     val garages by vm.garages.collectAsState()
+    val currentLocation by vm.currentLocation.collectAsState()
     val context = LocalContext.current
     var showAddDialog by remember { mutableStateOf(false) }
     var editingGarage by remember { mutableStateOf<Garage?>(null) }
     var showMenu by remember { mutableStateOf(false) }
+
+    // Seed location permission state on first composition and after grants.
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> vm.setLocationPermission(granted) }
+
+    LaunchedEffect(Unit) {
+        val already = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        vm.setLocationPermission(already)
+        if (!already) locationPermLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -109,7 +127,8 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
-        val json = context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } ?: return@rememberLauncherForActivityResult
+        val json = context.contentResolver.openInputStream(uri)
+            ?.use { it.readBytes().decodeToString() } ?: return@rememberLauncherForActivityResult
         vm.importJson(json)
     }
 
@@ -146,9 +165,7 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
     ) { padding ->
         if (garages.isEmpty()) {
             Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding),
+                Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -159,21 +176,24 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
             }
         } else {
             LazyColumn(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(horizontal = 16.dp),
+                Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 16.dp),
             ) {
                 items(garages, key = { it.id }) { garage ->
+                    val isNearest = currentLocation != null &&
+                            garage.latitude != null &&
+                            garage == garages.firstOrNull { it.latitude != null }
                     GarageCard(
                         garage = garage,
+                        currentLocation = currentLocation,
+                        isNearest = isNearest,
                         onEdit = { editingGarage = garage },
                         onDelete = {
                             clearTileForGarage(context, garage.id)
                             vm.delete(garage)
                         },
+                        onLocationPermissionChanged = { vm.setLocationPermission(it) },
                     )
                 }
             }
@@ -182,9 +202,10 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
 
     if (showAddDialog) {
         GarageDialog(
+            currentLocation = currentLocation,
             onDismiss = { showAddDialog = false },
-            onConfirm = { name, number ->
-                vm.add(Garage(name = name, phoneNumber = number))
+            onConfirm = { name, number, lat, lng ->
+                vm.add(Garage(name = name, phoneNumber = number, latitude = lat, longitude = lng))
                 showAddDialog = false
             },
         )
@@ -194,11 +215,13 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
         GarageDialog(
             initialName = garage.name,
             initialNumber = garage.phoneNumber,
+            initialLatitude = garage.latitude,
+            initialLongitude = garage.longitude,
+            currentLocation = currentLocation,
             onDismiss = { editingGarage = null },
-            onConfirm = { name, number ->
-                val updated = garage.copy(name = name, phoneNumber = number)
+            onConfirm = { name, number, lat, lng ->
+                val updated = garage.copy(name = name, phoneNumber = number, latitude = lat, longitude = lng)
                 vm.update(updated)
-                // Keep tile assignment in sync with renamed/renumbered garage
                 getGarageSlot(context, garage.id)?.let { setTileAssignment(context, it, updated) }
                 editingGarage = null
             },
@@ -207,7 +230,14 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
 }
 
 @Composable
-fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
+fun GarageCard(
+    garage: Garage,
+    currentLocation: Location?,
+    isNearest: Boolean,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onLocationPermissionChanged: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var pinnedSlot by remember { mutableIntStateOf(getGarageSlot(context, garage.id) ?: 0) }
@@ -217,13 +247,17 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     LaunchedEffect(isCalling) {
         if (isCalling) {
             secondsLeft = 12
-            repeat(12) {
-                delay(1_000L)
-                secondsLeft--
-            }
+            repeat(12) { delay(1_000L); secondsLeft-- }
             delay(2_500L)
             isCalling = false
         }
+    }
+
+    val distance = remember(currentLocation?.latitude, currentLocation?.longitude, garage.latitude, garage.longitude) {
+        val lat = garage.latitude ?: return@remember null
+        val lng = garage.longitude ?: return@remember null
+        val loc = currentLocation ?: return@remember null
+        FloatArray(1).also { Location.distanceBetween(loc.latitude, loc.longitude, lat, lng, it) }[0]
     }
 
     var hasCallPermission by remember {
@@ -244,6 +278,7 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     ) { perms ->
         hasCallPermission = perms[Manifest.permission.CALL_PHONE] == true
         hasAnswerPermission = perms[Manifest.permission.ANSWER_PHONE_CALLS] == true
+        onLocationPermissionChanged(perms[Manifest.permission.ACCESS_FINE_LOCATION] == true)
         if (hasCallPermission) {
             openGarage(context, garage.phoneNumber, hasAnswerPermission)
             returnToApp(context)
@@ -259,26 +294,35 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        garage.name,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(garage.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        if (isNearest) {
+                            SuggestionChip(
+                                onClick = {},
+                                label = { Text("Nearest", style = MaterialTheme.typography.labelSmall) },
+                                icon = { Icon(Icons.Default.LocationOn, null, Modifier.size(14.dp)) },
+                            )
+                        }
+                    }
                     Text(
                         garage.phoneNumber,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    distance?.let {
+                        Text(
+                            formatDistance(it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
                 Row {
-                    // Pin / unpin quick-settings tile
                     IconButton(onClick = {
                         if (pinnedSlot > 0) {
-                            setTileAssignment(context, pinnedSlot, null)
-                            pinnedSlot = 0
+                            setTileAssignment(context, pinnedSlot, null); pinnedSlot = 0
                         } else {
-                            val slot = nextAvailableSlot(context)
-                            if (slot != null) {
+                            nextAvailableSlot(context)?.let { slot ->
                                 setTileAssignment(context, slot, garage)
                                 pinnedSlot = slot
                                 requestAddTile(context, slot, garage.name)
@@ -287,22 +331,14 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                     }) {
                         if (pinnedSlot > 0) {
                             BadgedBox(badge = { Badge { Text("$pinnedSlot") } }) {
-                                Icon(
-                                    Icons.Filled.PushPin,
-                                    contentDescription = "Remove from Quick Settings",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
+                                Icon(Icons.Filled.PushPin, "Remove from Quick Settings", tint = MaterialTheme.colorScheme.primary)
                             }
                         } else {
-                            Icon(Icons.Outlined.PushPin, contentDescription = "Add to Quick Settings")
+                            Icon(Icons.Outlined.PushPin, "Add to Quick Settings")
                         }
                     }
-                    IconButton(onClick = onEdit) {
-                        Icon(Icons.Default.Edit, contentDescription = "Edit")
-                    }
-                    IconButton(onClick = { showDeleteConfirm = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Delete")
-                    }
+                    IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Edit") }
+                    IconButton(onClick = { showDeleteConfirm = true }) { Icon(Icons.Default.Delete, "Delete") }
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -318,13 +354,14 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                                 Manifest.permission.CALL_PHONE,
                                 Manifest.permission.ANSWER_PHONE_CALLS,
                                 Manifest.permission.WRITE_CALL_LOG,
+                                Manifest.permission.ACCESS_FINE_LOCATION,
                             ),
                         )
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Icon(Icons.Default.Garage, contentDescription = null, Modifier.size(20.dp))
+                Icon(Icons.Default.Garage, null, Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Open", fontSize = 18.sp)
             }
@@ -337,9 +374,7 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
             title = { Text("Delete \"${garage.name}\"?") },
             text = { Text("This garage will be removed.") },
             confirmButton = {
-                TextButton(onClick = { onDelete(); showDeleteConfirm = false }) {
-                    Text("Delete")
-                }
+                TextButton(onClick = { onDelete(); showDeleteConfirm = false }) { Text("Delete") }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
@@ -352,23 +387,88 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
             onDismissRequest = { isCalling = false },
             title = { Text("Opening ${garage.name}") },
             text = {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Hanging up automatically in $secondsLeft s…")
-                    LinearProgressIndicator(
-                        progress = { secondsLeft / 12f },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    LinearProgressIndicator(progress = { secondsLeft / 12f }, modifier = Modifier.fillMaxWidth())
                 }
             },
             confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { isCalling = false }) { Text("Dismiss") }
-            },
+            dismissButton = { TextButton(onClick = { isCalling = false }) { Text("Dismiss") } },
         )
     }
+}
+
+@Composable
+fun GarageDialog(
+    initialName: String = "",
+    initialNumber: String = "",
+    initialLatitude: Double? = null,
+    initialLongitude: Double? = null,
+    currentLocation: Location?,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, Double?, Double?) -> Unit,
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var number by remember { mutableStateOf(initialNumber) }
+    var latitude by remember { mutableStateOf(initialLatitude) }
+    var longitude by remember { mutableStateOf(initialLongitude) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initialName.isEmpty()) "Add Garage" else "Edit Garage") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it },
+                    label = { Text("Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = number, onValueChange = { number = it },
+                    label = { Text("Phone number") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                // Location row
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (latitude != null) {
+                            Icon(Icons.Default.LocationOn, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                            Text("Location set", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        } else {
+                            Icon(Icons.Outlined.LocationOff, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("No location", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Row {
+                        if (latitude != null) {
+                            TextButton(onClick = { latitude = null; longitude = null }) { Text("Clear") }
+                        }
+                        TextButton(
+                            onClick = { latitude = currentLocation?.latitude; longitude = currentLocation?.longitude },
+                            enabled = currentLocation != null,
+                        ) { Text("Use GPS") }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(name.trim(), number.trim(), latitude, longitude) },
+                enabled = name.isNotBlank() && number.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private fun formatDistance(metres: Float): String = when {
+    metres < 1_000 -> "${metres.toInt()} m away"
+    else -> "${"%.1f".format(metres / 1_000)} km away"
 }
 
 private fun returnToApp(context: android.content.Context) {
@@ -396,49 +496,5 @@ private fun requestAddTile(context: android.content.Context, slot: Int, garageNa
         Icon.createWithResource(context, R.drawable.ic_launcher_foreground),
         { it.run() },
         {},
-    )
-}
-
-@Composable
-fun GarageDialog(
-    initialName: String = "",
-    initialNumber: String = "",
-    onDismiss: () -> Unit,
-    onConfirm: (String, String) -> Unit,
-) {
-    var name by remember { mutableStateOf(initialName) }
-    var number by remember { mutableStateOf(initialNumber) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (initialName.isEmpty()) "Add Garage" else "Edit Garage") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = number,
-                    onValueChange = { number = it },
-                    label = { Text("Phone number") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onConfirm(name.trim(), number.trim()) },
-                enabled = name.isNotBlank() && number.isNotBlank(),
-            ) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
     )
 }

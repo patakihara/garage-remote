@@ -12,8 +12,8 @@ android {
         applicationId = "com.patakihara.garageremote"
         minSdk = 28
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.5"
+        versionCode = 6
+        versionName = "1.6"
     }
 
     val keystorePath = System.getenv("KEYSTORE_PATH")
@@ -66,6 +66,7 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.play.services.location)
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 }
