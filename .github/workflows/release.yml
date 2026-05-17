@@ -47,13 +47,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6.0
-          name: Garage Remote v1.6.0
+          tag_name: v1.7.0
+          name: Garage Remote v1.7.0
           draft: false
           prerelease: false
           files: app/build/outputs/apk/release/app-release.apk
           body: |
-            ## Garage Remote v1.6.0
+            ## Garage Remote v1.7.0
 
             An Android remote control for garages that open via phone call.
 
@@ -69,4 +69,4 @@ jobs:
             - Long-press the app icon to use Quick Settings shortcuts
             - Use the ⋮ menu to export/import your garage list as a JSON file
             - Grant **Location** permission to see garages sorted nearest-first with distance shown on each card
-            - Add a GPS location to any garage via the edit dialog ("Use GPS" button)
+            - Add a GPS location to any garage via the edit dialog — tap "Map" to pick visually on OpenStreetMap, or "Use GPS" to use your current position

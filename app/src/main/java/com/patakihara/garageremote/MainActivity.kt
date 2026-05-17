@@ -1,6 +1,7 @@
 package com.patakihara.garageremote
 
 import android.Manifest
+import android.app.Activity
 import android.app.StatusBarManager
 import android.content.ComponentName
 import android.content.Intent
@@ -408,10 +409,20 @@ fun GarageDialog(
     onDismiss: () -> Unit,
     onConfirm: (String, String, Double?, Double?) -> Unit,
 ) {
+    val context = LocalContext.current
     var name by remember { mutableStateOf(initialName) }
     var number by remember { mutableStateOf(initialNumber) }
     var latitude by remember { mutableStateOf(initialLatitude) }
     var longitude by remember { mutableStateOf(initialLongitude) }
+
+    val mapLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val data = result.data ?: return@rememberLauncherForActivityResult
+            val lat = data.getDoubleExtra(MapPickerActivity.EXTRA_LAT, Double.NaN)
+            val lng = data.getDoubleExtra(MapPickerActivity.EXTRA_LNG, Double.NaN)
+            if (!lat.isNaN() && !lng.isNaN()) { latitude = lat; longitude = lng }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -448,6 +459,13 @@ fun GarageDialog(
                         if (latitude != null) {
                             TextButton(onClick = { latitude = null; longitude = null }) { Text("Clear") }
                         }
+                        TextButton(onClick = {
+                            val intent = Intent(context, MapPickerActivity::class.java).apply {
+                                latitude?.let { putExtra(MapPickerActivity.EXTRA_LAT, it) }
+                                longitude?.let { putExtra(MapPickerActivity.EXTRA_LNG, it) }
+                            }
+                            mapLauncher.launch(intent)
+                        }) { Text("Map") }
                         TextButton(
                             onClick = { latitude = currentLocation?.latitude; longitude = currentLocation?.longitude },
                             enabled = currentLocation != null,
