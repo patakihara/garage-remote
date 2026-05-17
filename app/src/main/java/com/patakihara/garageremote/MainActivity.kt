@@ -59,7 +59,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import android.content.Intent
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -211,7 +210,6 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
         hasAnswerPermission = perms[Manifest.permission.ANSWER_PHONE_CALLS] == true
         if (hasCallPermission) {
             openGarage(context, garage.phoneNumber, hasAnswerPermission)
-            returnToApp(context)
             isCalling = true
         }
     }
@@ -275,7 +273,6 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                 onClick = {
                     if (hasCallPermission) {
                         openGarage(context, garage.phoneNumber, hasAnswerPermission)
-                        returnToApp(context)
                         isCalling = true
                     } else {
                         permissionLauncher.launch(
@@ -334,14 +331,6 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
             },
         )
     }
-}
-
-private fun returnToApp(context: android.content.Context) {
-    context.startActivity(
-        Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-        }
-    )
 }
 
 private fun requestAddTile(context: android.content.Context, slot: Int, garageName: String) {
