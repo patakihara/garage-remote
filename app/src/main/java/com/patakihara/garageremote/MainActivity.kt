@@ -1,14 +1,12 @@
 package com.patakihara.garageremote
 
 import android.Manifest
-import android.content.Context
-import android.content.Intent
+import android.app.StatusBarManager
+import android.content.ComponentName
 import android.content.pm.PackageManager
-import android.net.Uri
+import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.telecom.TelecomManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -34,7 +32,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Garage
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +53,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -82,6 +85,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
     val garages by vm.garages.collectAsState()
+    val context = LocalContext.current
     var showAddDialog by remember { mutableStateOf(false) }
     var editingGarage by remember { mutableStateOf<Garage?>(null) }
 
@@ -127,7 +131,10 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
                     GarageCard(
                         garage = garage,
                         onEdit = { editingGarage = garage },
-                        onDelete = { vm.delete(garage) },
+                        onDelete = {
+                            clearTileForGarage(context, garage.id)
+                            vm.delete(garage)
+                        },
                     )
                 }
             }
@@ -150,7 +157,10 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
             initialNumber = garage.phoneNumber,
             onDismiss = { editingGarage = null },
             onConfirm = { name, number ->
-                vm.update(garage.copy(name = name, phoneNumber = number))
+                val updated = garage.copy(name = name, phoneNumber = number)
+                vm.update(updated)
+                // Keep tile assignment in sync with renamed/renumbered garage
+                getGarageSlot(context, garage.id)?.let { setTileAssignment(context, it, updated) }
                 editingGarage = null
             },
         )
@@ -161,6 +171,8 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
 fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     val context = LocalContext.current
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var pinnedSlot by remember { mutableIntStateOf(getGarageSlot(context, garage.id) ?: 0) }
+
     var hasCallPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE)
@@ -202,6 +214,32 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                     )
                 }
                 Row {
+                    // Pin / unpin quick-settings tile
+                    IconButton(onClick = {
+                        if (pinnedSlot > 0) {
+                            setTileAssignment(context, pinnedSlot, null)
+                            pinnedSlot = 0
+                        } else {
+                            val slot = nextAvailableSlot(context)
+                            if (slot != null) {
+                                setTileAssignment(context, slot, garage)
+                                pinnedSlot = slot
+                                requestAddTile(context, slot, garage.name)
+                            }
+                        }
+                    }) {
+                        if (pinnedSlot > 0) {
+                            BadgedBox(badge = { Badge { Text("$pinnedSlot") } }) {
+                                Icon(
+                                    Icons.Filled.PushPin,
+                                    contentDescription = "Remove from Quick Settings",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        } else {
+                            Icon(Icons.Outlined.PushPin, contentDescription = "Add to Quick Settings")
+                        }
+                    }
                     IconButton(onClick = onEdit) {
                         Icon(Icons.Default.Edit, contentDescription = "Edit")
                     }
@@ -220,6 +258,7 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
                             arrayOf(
                                 Manifest.permission.CALL_PHONE,
                                 Manifest.permission.ANSWER_PHONE_CALLS,
+                                Manifest.permission.WRITE_CALL_LOG,
                             ),
                         )
                     }
@@ -250,18 +289,22 @@ fun GarageCard(garage: Garage, onEdit: () -> Unit, onDelete: () -> Unit) {
     }
 }
 
-// Initiates the call, then auto-hangs up after 2 rings (~12 seconds).
-fun openGarage(context: Context, phoneNumber: String, hasAnswerPermission: Boolean) {
-    context.startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:$phoneNumber")))
-    Handler(Looper.getMainLooper()).postDelayed({
-        if (hasAnswerPermission) {
-            try {
-                (context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager).endCall()
-            } catch (_: SecurityException) {
-                // Permission was revoked between the check and the call
-            }
-        }
-    }, 12_000L)
+private fun requestAddTile(context: android.content.Context, slot: Int, garageName: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val tileClass: Class<*> = when (slot) {
+        1 -> GarageTile1::class.java
+        2 -> GarageTile2::class.java
+        3 -> GarageTile3::class.java
+        else -> GarageTile4::class.java
+    }
+    val sbm = context.getSystemService(StatusBarManager::class.java) ?: return
+    sbm.requestAddTileService(
+        ComponentName(context, tileClass),
+        garageName,
+        Icon.createWithResource(context, R.drawable.ic_launcher_foreground),
+        { it.run() },
+        {},
+    )
 }
 
 @Composable
