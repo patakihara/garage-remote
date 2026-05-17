@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class GarageViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = GarageRepository(app)
@@ -26,5 +28,13 @@ class GarageViewModel(app: Application) : AndroidViewModel(app) {
 
     fun delete(garage: Garage) = viewModelScope.launch {
         repo.save(garages.value.filter { it.id != garage.id })
+    }
+
+    fun exportJson(): String = Json.encodeToString(garages.value)
+
+    fun importJson(json: String) = viewModelScope.launch {
+        try {
+            repo.save(Json.decodeFromString(json))
+        } catch (_: Exception) {}
     }
 }

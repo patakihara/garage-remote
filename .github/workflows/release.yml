@@ -33,28 +33,38 @@ jobs:
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
+
+      - name: Build release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/keystore.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.4.0
-          name: Garage Remote v1.4.0
+          tag_name: v1.5.0
+          name: Garage Remote v1.5.0
           draft: false
           prerelease: false
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/release/app-release.apk
           body: |
-            ## Garage Remote v1.4.0
+            ## Garage Remote v1.5.0
 
             An Android remote control for garages that open via phone call.
 
             ### How to install
-            1. On your Android phone go to **Settings → Apps → Special app access → Install unknown apps**, enable it for your browser or file manager
-            2. Download `app-debug.apk` below and tap to install
+            Download `app-release.apk` and tap to install.
+            Enable **Settings → Apps → Special app access → Install unknown apps** for your browser if prompted.
+
+            **Updates install directly** — no need to uninstall first.
 
             ### How to use
             - Tap **+** to add a garage (name + phone number)
             - Tap **Open** — the app calls the number and auto-hangs up after ~12 seconds (2 rings)
-
-            > Debug build, signed with the standard Android debug key. Works fine for personal sideloading.
+            - Long-press the app icon to use Quick Settings shortcuts
+            - Use the ⋮ menu to export/import your garage list as a JSON file
