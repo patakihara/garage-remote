@@ -1,0 +1,60 @@
+name: Build and Release APK
+
+on:
+  push:
+    branches: [claude/new-session-WRKZ0]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Write local.properties
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version=8.6
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: Garage Remote v1.0.0
+          draft: false
+          prerelease: false
+          files: app/build/outputs/apk/debug/app-debug.apk
+          body: |
+            ## Garage Remote v1.0.0
+
+            An Android remote control for garages that open via phone call.
+
+            ### How to install
+            1. On your Android phone go to **Settings → Apps → Special app access → Install unknown apps**, enable it for your browser or file manager
+            2. Download `app-debug.apk` below and tap to install
+
+            ### How to use
+            - Tap **+** to add a garage (name + phone number)
+            - Tap **Open** — the app calls the number and auto-hangs up after ~12 seconds (2 rings)
+
+            > Debug build, signed with the standard Android debug key. Works fine for personal sideloading.
