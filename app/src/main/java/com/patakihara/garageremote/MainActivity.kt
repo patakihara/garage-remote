@@ -2,13 +2,14 @@ package com.patakihara.garageremote
 
 import android.Manifest
 import android.app.Activity
-import android.app.StatusBarManager
-import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.drawable.Icon
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
 import android.location.Location
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,6 +18,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,30 +33,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Garage
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.LocationOff
-import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -63,6 +65,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -72,26 +75,33 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.patakihara.garageremote.ui.theme.GarageRemoteTheme
 import kotlinx.coroutines.delay
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            GarageRemoteTheme {
-                GarageRemoteApp()
-            }
-        }
+        setContent { GarageRemoteTheme { GarageRemoteApp() } }
     }
 }
 
@@ -101,101 +111,145 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
     val garages by vm.garages.collectAsState()
     val currentLocation by vm.currentLocation.collectAsState()
     val context = LocalContext.current
+
+    var showSettings by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var editingGarage by remember { mutableStateOf<Garage?>(null) }
-    var showMenu by remember { mutableStateOf(false) }
+    var selectedGarageId by remember { mutableStateOf<String?>(null) }
+    var isCalling by remember { mutableStateOf(false) }
+    var secondsLeft by remember { mutableIntStateOf(12) }
 
-    // Seed location permission state on first composition and after grants.
-    val locationPermLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted -> vm.setLocationPermission(granted) }
+    var hasCallPermission by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED)
+    }
+    var hasAnswerPermission by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED)
+    }
+
+    val locationPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.setLocationPermission(granted)
+    }
+    val callPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { perms ->
+        hasCallPermission = perms[Manifest.permission.CALL_PHONE] == true
+        hasAnswerPermission = perms[Manifest.permission.ANSWER_PHONE_CALLS] == true
+        if (hasCallPermission) {
+            val garage = garages.find { it.id == selectedGarageId } ?: garages.firstOrNull()
+            garage?.let { openGarage(context, it.phoneNumber, hasAnswerPermission); returnToApp(context); isCalling = true }
+        }
+    }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        val json = context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } ?: return@rememberLauncherForActivityResult
+        vm.importJson(json)
+    }
 
     LaunchedEffect(Unit) {
-        val already = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val already = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         vm.setLocationPermission(already)
         if (!already) locationPermLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) }
-    }
-    val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        val json = context.contentResolver.openInputStream(uri)
-            ?.use { it.readBytes().decodeToString() } ?: return@rememberLauncherForActivityResult
-        vm.importJson(json)
+    // Auto-select nearest (garages is sorted nearest-first by the VM) on first load or if selection disappears
+    LaunchedEffect(garages) {
+        if (selectedGarageId == null || garages.none { it.id == selectedGarageId })
+            selectedGarageId = garages.firstOrNull()?.id
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Garage Remote") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                ),
-                actions = {
-                    IconButton(onClick = { showMenu = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "Menu")
-                    }
-                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Export garages") },
-                            onClick = { exportLauncher.launch("garages.json"); showMenu = false },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Import garages") },
-                            onClick = { importLauncher.launch(arrayOf("application/json")); showMenu = false },
-                        )
-                    }
-                },
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = { showAddDialog = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Add garage")
-            }
-        },
-    ) { padding ->
-        if (garages.isEmpty()) {
-            Box(
-                Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "No garages yet.\nTap + to add one.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    textAlign = TextAlign.Center,
+    LaunchedEffect(isCalling) {
+        if (isCalling) {
+            secondsLeft = 12
+            repeat(12) { delay(1_000L); secondsLeft-- }
+            delay(2_500L)
+            isCalling = false
+        }
+    }
+
+    val selectedGarage = garages.find { it.id == selectedGarageId } ?: garages.firstOrNull()
+    val isNearest = currentLocation != null && selectedGarage?.latitude != null &&
+        selectedGarage == garages.firstOrNull { it.latitude != null }
+    val distance = selectedGarage?.let { vm.distanceTo(it, currentLocation) }
+
+    if (showSettings) {
+        SettingsScreen(
+            garages = garages,
+            onBack = { showSettings = false },
+            onAdd = { showAddDialog = true },
+            onEdit = { editingGarage = it },
+            onDelete = { g -> clearTileForGarage(context, g.id); vm.delete(g) },
+            onExport = { exportLauncher.launch("garages.json") },
+            onImport = { importLauncher.launch(arrayOf("application/json")) },
+        )
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Garage Remote") },
+                    navigationIcon = {
+                        IconButton(onClick = { showSettings = true }) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                 )
             }
-        } else {
-            LazyColumn(
-                Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(vertical = 16.dp),
+        ) { padding ->
+            Column(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(bottom = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                items(garages, key = { it.id }) { garage ->
-                    val isNearest = currentLocation != null &&
-                            garage.latitude != null &&
-                            garage == garages.firstOrNull { it.latitude != null }
-                    GarageCard(
-                        garage = garage,
-                        currentLocation = currentLocation,
-                        isNearest = isNearest,
-                        onEdit = { editingGarage = garage },
-                        onDelete = {
-                            clearTileForGarage(context, garage.id)
-                            vm.delete(garage)
-                        },
-                        onLocationPermissionChanged = { vm.setLocationPermission(it) },
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    HeroCircle(garage = selectedGarage, currentLocation = currentLocation, isNearest = isNearest, distance = distance)
+                }
+
+                if (isCalling) {
+                    Text(
+                        "Hangs up automatically · 0:${secondsLeft.toString().padStart(2, '0')}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
                     )
+                } else {
+                    Spacer(Modifier.height(16.dp))
+                }
+
+                GarageChipRow(
+                    garages = garages,
+                    selectedId = selectedGarageId,
+                    onSelect = { selectedGarageId = it },
+                    onAdd = { showAddDialog = true },
+                )
+
+                Spacer(Modifier.height(16.dp))
+
+                Button(
+                    onClick = {
+                        selectedGarage ?: return@Button
+                        if (hasCallPermission) {
+                            openGarage(context, selectedGarage.phoneNumber, hasAnswerPermission)
+                            returnToApp(context)
+                            isCalling = true
+                        } else {
+                            callPermLauncher.launch(arrayOf(
+                                Manifest.permission.CALL_PHONE,
+                                Manifest.permission.ANSWER_PHONE_CALLS,
+                                Manifest.permission.WRITE_CALL_LOG,
+                            ))
+                        }
+                    },
+                    enabled = !isCalling && selectedGarage != null,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(56.dp),
+                ) {
+                    if (isCalling) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.Garage, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open ${selectedGarage?.name ?: ""}", fontSize = 18.sp)
+                    }
                 }
             }
         }
@@ -231,172 +285,244 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
 }
 
 @Composable
-fun GarageCard(
-    garage: Garage,
-    currentLocation: Location?,
-    isNearest: Boolean,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onLocationPermissionChanged: (Boolean) -> Unit,
+fun HeroCircle(garage: Garage?, currentLocation: Location?, isNearest: Boolean, distance: Float?) {
+    val context = LocalContext.current
+
+    val mapView = remember {
+        Configuration.getInstance().apply {
+            load(context, context.getSharedPreferences("osmdroid", 0))
+            userAgentValue = context.packageName
+            osmdroidBasePath = context.cacheDir
+        }
+        MapView(context).apply {
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(false)
+            isEnabled = false
+            isFocusable = false
+            controller.setZoom(17.0)
+        }
+    }
+
+    val locationMarker = remember {
+        Marker(mapView).apply {
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            icon = createBlueDot(context)
+            setInfoWindow(null)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    Box(modifier = Modifier.size(280.dp), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier.fillMaxSize().clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            if (garage?.latitude != null && garage.longitude != null) {
+                AndroidView(
+                    factory = { mapView },
+                    update = { map ->
+                        map.controller.setCenter(GeoPoint(garage.latitude, garage.longitude))
+                        val loc = currentLocation
+                        if (loc != null) {
+                            locationMarker.position = GeoPoint(loc.latitude, loc.longitude)
+                            if (!map.overlays.contains(locationMarker)) map.overlays.add(locationMarker)
+                        } else {
+                            map.overlays.remove(locationMarker)
+                        }
+                        map.invalidate()
+                    },
+                    modifier = Modifier.fillMaxSize().alpha(0.35f),
+                )
+            }
+        }
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
+            if (isNearest && distance != null) {
+                SuggestionChip(
+                    onClick = {},
+                    label = { Text("NEAREST · ${formatDistanceShort(distance)}", style = MaterialTheme.typography.labelSmall) },
+                    icon = { Icon(Icons.Default.LocationOn, null, Modifier.size(14.dp)) },
+                )
+            }
+            Text(
+                text = garage?.name ?: "",
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = garage?.phoneNumber ?: "",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun createBlueDot(context: Context): BitmapDrawable {
+    val dp = context.resources.displayMetrics.density
+    val size = (16 * dp).toInt()
+    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    Canvas(bmp).drawCircle(size / 2f, size / 2f, size / 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF1976D2.toInt() })
+    return BitmapDrawable(context.resources, bmp)
+}
+
+@Composable
+fun GarageChipRow(garages: List<Garage>, selectedId: String?, onSelect: (String) -> Unit, onAdd: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
+            items(garages, key = { it.id }) { garage ->
+                FilterChip(
+                    selected = garage.id == selectedId,
+                    onClick = { onSelect(garage.id) },
+                    label = { Text(garage.name) },
+                    leadingIcon = if (garage.id == selectedId) {
+                        { Icon(Icons.Default.Check, null, Modifier.size(FilterChipDefaults.IconSize)) }
+                    } else null,
+                )
+            }
+        }
+        IconButton(onClick = onAdd) { Icon(Icons.Default.Add, contentDescription = "Add garage") }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(
+    garages: List<Garage>,
+    onBack: () -> Unit,
+    onAdd: () -> Unit,
+    onEdit: (Garage) -> Unit,
+    onDelete: (Garage) -> Unit,
+    onExport: () -> Unit,
+    onImport: () -> Unit,
 ) {
     val context = LocalContext.current
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var pinnedSlot by remember { mutableIntStateOf(getGarageSlot(context, garage.id) ?: 0) }
-    var isCalling by remember { mutableStateOf(false) }
-    var secondsLeft by remember { mutableIntStateOf(12) }
+    var deleteTarget by remember { mutableStateOf<Garage?>(null) }
 
-    LaunchedEffect(isCalling) {
-        if (isCalling) {
-            secondsLeft = 12
-            repeat(12) { delay(1_000L); secondsLeft-- }
-            delay(2_500L)
-            isCalling = false
-        }
+    val locationGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    val callGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+
+    @Suppress("DEPRECATION")
+    val versionName = remember {
+        try { context.packageManager.getPackageInfo(context.packageName, 0).versionName } catch (_: Exception) { null }
     }
 
-    val distance = remember(currentLocation?.latitude, currentLocation?.longitude, garage.latitude, garage.longitude) {
-        val lat = garage.latitude ?: return@remember null
-        val lng = garage.longitude ?: return@remember null
-        val loc = currentLocation ?: return@remember null
-        FloatArray(1).also { Location.distanceBetween(loc.latitude, loc.longitude, lat, lng, it) }[0]
-    }
-
-    var hasCallPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE)
-                == PackageManager.PERMISSION_GRANTED,
-        )
-    }
-    var hasAnswerPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS)
-                == PackageManager.PERMISSION_GRANTED,
-        )
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions(),
-    ) { perms ->
-        hasCallPermission = perms[Manifest.permission.CALL_PHONE] == true
-        hasAnswerPermission = perms[Manifest.permission.ANSWER_PHONE_CALLS] == true
-        onLocationPermissionChanged(perms[Manifest.permission.ACCESS_FINE_LOCATION] == true)
-        if (hasCallPermission) {
-            openGarage(context, garage.phoneNumber, hasAnswerPermission)
-            returnToApp(context)
-            isCalling = true
-        }
-    }
-
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(garage.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        if (isNearest) {
-                            SuggestionChip(
-                                onClick = {},
-                                label = { Text("Nearest", style = MaterialTheme.typography.labelSmall) },
-                                icon = { Icon(Icons.Default.LocationOn, null, Modifier.size(14.dp)) },
-                            )
-                        }
-                    }
-                    Text(
-                        garage.phoneNumber,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    distance?.let {
-                        Text(
-                            formatDistance(it),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
-                Row {
-                    IconButton(onClick = {
-                        if (pinnedSlot > 0) {
-                            setTileAssignment(context, pinnedSlot, null); pinnedSlot = 0
-                        } else {
-                            nextAvailableSlot(context)?.let { slot ->
-                                setTileAssignment(context, slot, garage)
-                                pinnedSlot = slot
-                                requestAddTile(context, slot, garage.name)
-                            }
-                        }
-                    }) {
-                        if (pinnedSlot > 0) {
-                            BadgedBox(badge = { Badge { Text("$pinnedSlot") } }) {
-                                Icon(Icons.Filled.PushPin, "Remove from Quick Settings", tint = MaterialTheme.colorScheme.primary)
-                            }
-                        } else {
-                            Icon(Icons.Outlined.PushPin, "Add to Quick Settings")
-                        }
-                    }
-                    IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Edit") }
-                    IconButton(onClick = { showDeleteConfirm = true }) { Icon(Icons.Default.Delete, "Delete") }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = {
-                    if (hasCallPermission) {
-                        openGarage(context, garage.phoneNumber, hasAnswerPermission)
-                        returnToApp(context)
-                        isCalling = true
-                    } else {
-                        permissionLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.CALL_PHONE,
-                                Manifest.permission.ANSWER_PHONE_CALLS,
-                                Manifest.permission.WRITE_CALL_LOG,
-                                Manifest.permission.ACCESS_FINE_LOCATION,
-                            ),
-                        )
-                    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Default.Garage, null, Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Open", fontSize = 18.sp)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+            )
+        }
+    ) { padding ->
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
+            item { SettingsSectionHeader("GARAGES") }
+            items(garages, key = { it.id }) { garage ->
+                ListItem(
+                    headlineContent = { Text(garage.name) },
+                    supportingContent = { Text(garage.phoneNumber, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { onEdit(garage) }) { Icon(Icons.Default.Edit, "Edit") }
+                            IconButton(onClick = { deleteTarget = garage }) { Icon(Icons.Default.Delete, "Delete") }
+                        }
+                    },
+                )
             }
+            item {
+                TextButton(onClick = onAdd, modifier = Modifier.padding(start = 8.dp)) {
+                    Icon(Icons.Default.Add, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add garage")
+                }
+            }
+
+            item { SettingsSectionHeader("DATA") }
+            item {
+                ListItem(
+                    headlineContent = { Text("Export garages") },
+                    supportingContent = { Text("Save garage list as a JSON file") },
+                    modifier = Modifier.clickable { onExport() },
+                )
+            }
+            item {
+                ListItem(
+                    headlineContent = { Text("Import garages") },
+                    supportingContent = { Text("Load garage list from a JSON file") },
+                    modifier = Modifier.clickable { onImport() },
+                )
+            }
+
+            item { SettingsSectionHeader("PERMISSIONS") }
+            item { PermissionRow("Location", "Used to detect nearest garage", locationGranted) }
+            item { PermissionRow("Phone calls", "Required to dial the remote", callGranted) }
+
+            item { SettingsSectionHeader("ABOUT") }
+            item { ListItem(headlineContent = { Text("Version") }, trailingContent = { Text(versionName ?: "—") }) }
         }
     }
 
-    if (showDeleteConfirm) {
+    deleteTarget?.let { garage ->
         AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
+            onDismissRequest = { deleteTarget = null },
             title = { Text("Delete \"${garage.name}\"?") },
             text = { Text("This garage will be removed.") },
-            confirmButton = {
-                TextButton(onClick = { onDelete(); showDeleteConfirm = false }) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
-            },
+            confirmButton = { TextButton(onClick = { onDelete(garage); deleteTarget = null }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
         )
     }
+}
 
-    if (isCalling) {
-        AlertDialog(
-            onDismissRequest = { isCalling = false },
-            title = { Text("Opening ${garage.name}") },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Hanging up automatically in $secondsLeft s…")
-                    LinearProgressIndicator(progress = { secondsLeft / 12f }, modifier = Modifier.fillMaxWidth())
+@Composable
+fun SettingsSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+    )
+}
+
+@Composable
+fun PermissionRow(title: String, description: String, granted: Boolean) {
+    ListItem(
+        headlineContent = { Text(title) },
+        supportingContent = { Text(description) },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (granted) {
+                    Icon(Icons.Default.Check, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("Granted", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                } else {
+                    Text("Denied", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
                 }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { isCalling = false }) { Text("Dismiss") } },
-        )
-    }
+            }
+        },
+    )
 }
 
 @Composable
@@ -429,23 +555,14 @@ fun GarageDialog(
         title = { Text(if (initialName.isEmpty()) "Add Garage" else "Edit Garage") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = name, onValueChange = { name = it },
-                    label = { Text("Name") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     value = number, onValueChange = { number = it },
                     label = { Text("Phone number") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                // Location row
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (latitude != null) {
                             Icon(Icons.Default.LocationOn, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
@@ -475,44 +592,21 @@ fun GarageDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = { onConfirm(name.trim(), number.trim(), latitude, longitude) },
-                enabled = name.isNotBlank() && number.isNotBlank(),
-            ) { Text("Save") }
+            TextButton(onClick = { onConfirm(name.trim(), number.trim(), latitude, longitude) }, enabled = name.isNotBlank() && number.isNotBlank()) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
-private fun formatDistance(metres: Float): String = when {
-    metres < 1_000 -> "${metres.toInt()} m away"
-    else -> "${"%.1f".format(metres / 1_000)} km away"
+private fun formatDistanceShort(metres: Float): String = when {
+    metres < 1_000 -> "${metres.toInt()} M"
+    else -> "${"%.1f".format(metres / 1_000)} KM"
 }
 
-private fun returnToApp(context: android.content.Context) {
+private fun returnToApp(context: Context) {
     Handler(Looper.getMainLooper()).postDelayed({
-        context.startActivity(
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-            }
-        )
+        context.startActivity(Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        })
     }, 1_500L)
-}
-
-private fun requestAddTile(context: android.content.Context, slot: Int, garageName: String) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-    val tileClass: Class<*> = when (slot) {
-        1 -> GarageTile1::class.java
-        2 -> GarageTile2::class.java
-        3 -> GarageTile3::class.java
-        else -> GarageTile4::class.java
-    }
-    val sbm = context.getSystemService(StatusBarManager::class.java) ?: return
-    sbm.requestAddTileService(
-        ComponentName(context, tileClass),
-        garageName,
-        Icon.createWithResource(context, R.drawable.ic_launcher_foreground),
-        { it.run() },
-        {},
-    )
 }
