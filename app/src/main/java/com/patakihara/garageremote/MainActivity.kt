@@ -2,6 +2,8 @@ package com.patakihara.garageremote
 
 import android.Manifest
 import android.app.Activity
+import android.app.StatusBarManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,9 +12,8 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.drawable.BitmapDrawable
 import android.location.Location
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -20,6 +21,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,8 +36,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -45,20 +48,25 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Garage
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.LocationOff
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -73,10 +81,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -91,6 +101,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.patakihara.garageremote.ui.theme.GarageRemoteTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
@@ -118,6 +130,7 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
     var selectedGarageId by remember { mutableStateOf<String?>(null) }
     var isCalling by remember { mutableStateOf(false) }
     var secondsLeft by remember { mutableIntStateOf(12) }
+    var isLocating by remember { mutableStateOf(false) }
 
     var hasCallPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED)
@@ -153,9 +166,29 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
         if (!already) locationPermLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
-    // Auto-select nearest (garages is sorted nearest-first by the VM) on first load or if selection disappears
+    // Show loader while waiting for first GPS fix (only if garages have location data)
+    LaunchedEffect(Unit) {
+        val permGranted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!permGranted) return@LaunchedEffect
+
+        val loadedGarages = withTimeoutOrNull(3_000L) {
+            snapshotFlow { garages }.first { it.isNotEmpty() }
+        } ?: return@LaunchedEffect
+
+        if (loadedGarages.none { it.latitude != null } || currentLocation != null) return@LaunchedEffect
+
+        isLocating = true
+        withTimeoutOrNull(5_000L) { snapshotFlow { currentLocation }.first { it != null } }
+        delay(200L) // let VM's combine() re-sort garages
+        isLocating = false
+        selectedGarageId = garages.firstOrNull()?.id
+    }
+
+    // Auto-select nearest when garages change (if nothing selected or selection deleted)
     LaunchedEffect(garages) {
-        if (selectedGarageId == null || garages.none { it.id == selectedGarageId })
+        if (!isLocating && (selectedGarageId == null || garages.none { it.id == selectedGarageId }))
             selectedGarageId = garages.firstOrNull()?.id
     }
 
@@ -187,7 +220,7 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text("Garage Remote") },
+                    title = {},
                     navigationIcon = {
                         IconButton(onClick = { showSettings = true }) {
                             Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -197,58 +230,79 @@ fun GarageRemoteApp(vm: GarageViewModel = viewModel()) {
                 )
             }
         ) { padding ->
-            Column(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(bottom = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    HeroCircle(garage = selectedGarage, currentLocation = currentLocation, isNearest = isNearest, distance = distance)
+            if (isLocating) {
+                Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(80.dp), strokeWidth = 6.dp)
                 }
-
-                if (isCalling) {
-                    Text(
-                        "Hangs up automatically · 0:${secondsLeft.toString().padStart(2, '0')}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                } else {
-                    Spacer(Modifier.height(16.dp))
-                }
-
-                GarageChipRow(
-                    garages = garages,
-                    selectedId = selectedGarageId,
-                    onSelect = { selectedGarageId = it },
-                    onAdd = { showAddDialog = true },
-                )
-
-                Spacer(Modifier.height(16.dp))
-
-                Button(
-                    onClick = {
-                        selectedGarage ?: return@Button
-                        if (hasCallPermission) {
-                            openGarage(context, selectedGarage.phoneNumber, hasAnswerPermission)
-                            returnToApp(context)
-                            isCalling = true
-                        } else {
-                            callPermLauncher.launch(arrayOf(
-                                Manifest.permission.CALL_PHONE,
-                                Manifest.permission.ANSWER_PHONE_CALLS,
-                                Manifest.permission.WRITE_CALL_LOG,
-                            ))
-                        }
-                    },
-                    enabled = !isCalling && selectedGarage != null,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(56.dp),
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .padding(bottom = 16.dp)
+                        .pointerInput(garages) {
+                            var acc = 0f
+                            detectHorizontalDragGestures(onDragEnd = { acc = 0f }) { _, drag ->
+                                acc += drag
+                                if (kotlin.math.abs(acc) > 200f) {
+                                    val idx = garages.indexOfFirst { it.id == selectedGarageId }
+                                    if (acc < 0 && idx in 0 until garages.lastIndex) selectedGarageId = garages[idx + 1].id
+                                    else if (acc > 0 && idx > 0) selectedGarageId = garages[idx - 1].id
+                                    acc = 0f
+                                }
+                            }
+                        },
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        HeroCircle(garage = selectedGarage, currentLocation = currentLocation, isNearest = isNearest, distance = distance)
+                    }
+
                     if (isCalling) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                        Text(
+                            "Hangs up automatically · 0:${secondsLeft.toString().padStart(2, '0')}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
                     } else {
-                        Icon(Icons.Default.Garage, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Open ${selectedGarage?.name ?: ""}", fontSize = 18.sp)
+                        Spacer(Modifier.height(16.dp))
+                    }
+
+                    GarageSelector(
+                        garages = garages,
+                        selectedId = selectedGarageId,
+                        onSelect = { selectedGarageId = it },
+                        onAdd = { showAddDialog = true },
+                    )
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            selectedGarage ?: return@Button
+                            if (hasCallPermission) {
+                                openGarage(context, selectedGarage.phoneNumber, hasAnswerPermission)
+                                returnToApp(context)
+                                isCalling = true
+                            } else {
+                                callPermLauncher.launch(arrayOf(
+                                    Manifest.permission.CALL_PHONE,
+                                    Manifest.permission.ANSWER_PHONE_CALLS,
+                                    Manifest.permission.WRITE_CALL_LOG,
+                                ))
+                            }
+                        },
+                        enabled = !isCalling && selectedGarage != null,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(56.dp),
+                    ) {
+                        if (isCalling) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Garage, null, Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Open", fontSize = 18.sp)
+                        }
                     }
                 }
             }
@@ -326,9 +380,7 @@ fun HeroCircle(garage: Garage?, currentLocation: Location?, isNearest: Boolean, 
     }
 
     Box(modifier = Modifier.size(280.dp), contentAlignment = Alignment.Center) {
-        Box(
-            modifier = Modifier.fillMaxSize().clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
-        ) {
+        Box(modifier = Modifier.fillMaxSize().clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)) {
             if (garage?.latitude != null && garage.longitude != null) {
                 AndroidView(
                     factory = { mapView },
@@ -347,7 +399,6 @@ fun HeroCircle(garage: Garage?, currentLocation: Location?, isNearest: Boolean, 
                 )
             }
         }
-
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -360,17 +411,8 @@ fun HeroCircle(garage: Garage?, currentLocation: Location?, isNearest: Boolean, 
                     icon = { Icon(Icons.Default.LocationOn, null, Modifier.size(14.dp)) },
                 )
             }
-            Text(
-                text = garage?.name ?: "",
-                style = MaterialTheme.typography.displaySmall,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-            )
-            Text(
-                text = garage?.phoneNumber ?: "",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Text(garage?.name ?: "", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            Text(garage?.phoneNumber ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -383,23 +425,19 @@ private fun createBlueDot(context: Context): BitmapDrawable {
     return BitmapDrawable(context.resources, bmp)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GarageChipRow(garages: List<Garage>, selectedId: String?, onSelect: (String) -> Unit, onAdd: () -> Unit) {
+fun GarageSelector(garages: List<Garage>, selectedId: String?, onSelect: (String) -> Unit, onAdd: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        LazyRow(
-            modifier = Modifier.weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(horizontal = 8.dp),
-        ) {
-            items(garages, key = { it.id }) { garage ->
-                FilterChip(
-                    selected = garage.id == selectedId,
-                    onClick = { onSelect(garage.id) },
-                    label = { Text(garage.name) },
-                    leadingIcon = if (garage.id == selectedId) {
-                        { Icon(Icons.Default.Check, null, Modifier.size(FilterChipDefaults.IconSize)) }
-                    } else null,
-                )
+        Box(modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+            SingleChoiceSegmentedButtonRow {
+                garages.forEachIndexed { index, garage ->
+                    SegmentedButton(
+                        selected = garage.id == selectedId,
+                        onClick = { onSelect(garage.id) },
+                        shape = SegmentedButtonDefaults.itemShape(index, garages.size),
+                    ) { Text(garage.name) }
+                }
             }
         }
         IconButton(onClick = onAdd) { Icon(Icons.Default.Add, contentDescription = "Add garage") }
@@ -419,6 +457,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var deleteTarget by remember { mutableStateOf<Garage?>(null) }
+    var tileRevision by remember { mutableIntStateOf(0) }
 
     val locationGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
     val callGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
@@ -442,11 +481,35 @@ fun SettingsScreen(
         LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
             item { SettingsSectionHeader("GARAGES") }
             items(garages, key = { it.id }) { garage ->
+                val slot = remember(tileRevision, garage.id) { getGarageSlot(context, garage.id) }
+                val canPin = remember(tileRevision) { nextAvailableSlot(context) != null }
                 ListItem(
                     headlineContent = { Text(garage.name) },
                     supportingContent = { Text(garage.phoneNumber, color = MaterialTheme.colorScheme.onSurfaceVariant) },
                     trailingContent = {
                         Row {
+                            IconButton(
+                                onClick = {
+                                    if (slot != null) {
+                                        setTileAssignment(context, slot, null)
+                                    } else {
+                                        nextAvailableSlot(context)?.let { s ->
+                                            setTileAssignment(context, s, garage)
+                                            requestAddTile(context, s, garage.name)
+                                        }
+                                    }
+                                    tileRevision++
+                                },
+                                enabled = slot != null || canPin,
+                            ) {
+                                if (slot != null) {
+                                    BadgedBox(badge = { Badge { Text("$slot") } }) {
+                                        Icon(Icons.Filled.PushPin, "Remove tile", tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                } else {
+                                    Icon(Icons.Outlined.PushPin, "Add to Quick Settings")
+                                }
+                            }
                             IconButton(onClick = { onEdit(garage) }) { Icon(Icons.Default.Edit, "Edit") }
                             IconButton(onClick = { deleteTarget = garage }) { Icon(Icons.Default.Delete, "Delete") }
                         }
@@ -455,27 +518,24 @@ fun SettingsScreen(
             }
             item {
                 TextButton(onClick = onAdd, modifier = Modifier.padding(start = 8.dp)) {
-                    Icon(Icons.Default.Add, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Add garage")
+                    Icon(Icons.Default.Add, null); Spacer(Modifier.width(4.dp)); Text("Add garage")
                 }
             }
 
+            item { SettingsSectionHeader("QUICK SETTINGS") }
+            item {
+                ListItem(
+                    headlineContent = { Text("Nearest garage tile") },
+                    supportingContent = { Text("Opens the closest garage automatically") },
+                    trailingContent = {
+                        TextButton(onClick = { requestAddNearestTile(context) }) { Text("Add tile") }
+                    },
+                )
+            }
+
             item { SettingsSectionHeader("DATA") }
-            item {
-                ListItem(
-                    headlineContent = { Text("Export garages") },
-                    supportingContent = { Text("Save garage list as a JSON file") },
-                    modifier = Modifier.clickable { onExport() },
-                )
-            }
-            item {
-                ListItem(
-                    headlineContent = { Text("Import garages") },
-                    supportingContent = { Text("Load garage list from a JSON file") },
-                    modifier = Modifier.clickable { onImport() },
-                )
-            }
+            item { ListItem(headlineContent = { Text("Export garages") }, supportingContent = { Text("Save as JSON file") }, modifier = Modifier.clickable { onExport() }) }
+            item { ListItem(headlineContent = { Text("Import garages") }, supportingContent = { Text("Load from JSON file") }, modifier = Modifier.clickable { onImport() }) }
 
             item { SettingsSectionHeader("PERMISSIONS") }
             item { PermissionRow("Location", "Used to detect nearest garage", locationGranted) }
@@ -603,10 +663,26 @@ private fun formatDistanceShort(metres: Float): String = when {
     else -> "${"%.1f".format(metres / 1_000)} KM"
 }
 
-private fun returnToApp(context: Context) {
-    Handler(Looper.getMainLooper()).postDelayed({
-        context.startActivity(Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-        })
-    }, 1_500L)
+private fun requestAddTile(context: Context, slot: Int, garageName: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val tileClass: Class<*> = when (slot) {
+        1 -> GarageTile1::class.java; 2 -> GarageTile2::class.java
+        3 -> GarageTile3::class.java; else -> GarageTile4::class.java
+    }
+    val sbm = context.getSystemService(StatusBarManager::class.java) ?: return
+    sbm.requestAddTileService(
+        ComponentName(context, tileClass), garageName,
+        android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_launcher_foreground),
+        { it.run() }, {},
+    )
+}
+
+private fun requestAddNearestTile(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val sbm = context.getSystemService(StatusBarManager::class.java) ?: return
+    sbm.requestAddTileService(
+        ComponentName(context, GarageTileNearest::class.java), "Nearest Garage",
+        android.graphics.drawable.Icon.createWithResource(context, R.drawable.ic_launcher_foreground),
+        { it.run() }, {},
+    )
 }

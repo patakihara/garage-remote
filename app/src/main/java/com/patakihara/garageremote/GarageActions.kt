@@ -45,3 +45,14 @@ private fun deleteCallLogEntry(context: Context, phoneNumber: String) {
         )
     } catch (_: Exception) {}
 }
+
+fun returnToApp(context: Context) {
+    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        context.startActivity(
+            android.content.Intent(context, MainActivity::class.java).apply {
+                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            }
+        )
+    }, 1_500L)
+}

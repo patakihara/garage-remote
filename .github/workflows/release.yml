@@ -47,13 +47,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.0
-          name: Garage Remote v2.0.0
+          tag_name: v2.1.0
+          name: Garage Remote v2.1.0
           draft: false
           prerelease: false
           files: app/build/outputs/apk/release/app-release.apk
           body: |
-            ## Garage Remote v2.0.0
+            ## Garage Remote v2.1.0
 
             An Android remote control for garages that open via phone call.
 
@@ -63,10 +63,18 @@ jobs:
 
             **Updates install directly** — no need to uninstall first.
 
+            ### What's new in v2.1
+            - **Nearest Garage** Quick Settings tile — dynamically finds and opens the closest garage
+            - Swipe anywhere on screen to switch between garages
+            - Connected button group (segmented buttons) to select garages, scrollable when there are many
+            - Large loading indicator while nearest garage is being determined
+            - QS tile management restored in Settings (pin/unpin per garage)
+
             ### How to use
             - Tap **+** to add a garage (name + phone number)
             - Tap **Open** — the app calls the number and auto-hangs up after ~12 seconds (2 rings)
-            - Long-press the app icon to use Quick Settings shortcuts
-            - Use the ⋮ menu to export/import your garage list as a JSON file
+            - Swipe left/right anywhere to switch between garages
+            - Open Settings → Garages to pin Quick Settings tiles
+            - Use the ⋮ menu in Settings to export/import your garage list as a JSON file
             - Grant **Location** permission to see garages sorted nearest-first with distance shown on each card
             - Add a GPS location to any garage via the edit dialog — tap "Map" to pick visually on OpenStreetMap, or "Use GPS" to use your current position

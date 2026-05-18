@@ -12,8 +12,8 @@ android {
         applicationId = "com.patakihara.garageremote"
         minSdk = 28
         targetSdk = 34
-        versionCode = 8
-        versionName = "2.0"
+        versionCode = 9
+        versionName = "2.1"
     }
 
     val keystorePath = System.getenv("KEYSTORE_PATH")
