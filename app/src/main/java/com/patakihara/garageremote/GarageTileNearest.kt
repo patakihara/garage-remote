@@ -61,7 +61,7 @@ class GarageTileNearest : TileService() {
                                     g.latitude!!, g.longitude!!, it,
                                 )
                             }[0]
-                        }
+                        } ?: withLocation.first()
                     } else withLocation.first()
                 } else garages.first()
 
